@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+from price_export import price_rows, write_csv
 import glob
 import json
 import base64
@@ -22,7 +23,7 @@ import requests
 # ──────────────────────────────────────────────────────────────────────────────
 # НАСТРОЙКИ
 # ──────────────────────────────────────────────────────────────────────────────
-DATA_FOLDER         = "pdf_data"
+DATA_FOLDER         = os.getenv("DATA_DIR", "pdf_data")
 STATIONS_CSV        = "stations.csv"
 LUKOIL_STATIONS_CSV = "stations_lukoil.csv"   # справочник нефтебаз Лукойл (имя → lat/lon/code)
 ROSNEFT_STATIONS_CSV = "rosneft_stations.csv" # отдельный справочник НБ Роснефть
@@ -31,7 +32,7 @@ TRANSIT_CITY_STATIONS_CSV = "transit_city_stations.csv"  # отдельный с
 LUKOIL_PRICE_URL    = "https://auto.lukoil.ru/ru/ForBusiness/wholesale/price"
 LUKOIL_BASE_URL     = "https://auto.lukoil.ru"
 LUKOIL_SPOT_PREFIX  = "lukoil_spot"
-PUBLIC_DIR          = "public"
+PUBLIC_DIR          = os.getenv("OUTPUT_DIR", "public")
 
 VENDOR_ASSET_URLS = {
     "assets/vendor/leaflet/leaflet.css": "https://cdn.jsdelivr.net/npm/leaflet@1.9.3/dist/leaflet.css",
@@ -150,7 +151,7 @@ DEFAULT_TG_STATION_COORDS = {
     "ТНАС":                       (55.615670, 49.276375),
     "Татнефтьавиасервис":         (55.615670, 49.276375),
 }
- 
+
 # Маппинг внутренних ключей топлива → категория карты
 TG_FUEL_TO_CAT = {
     "АИ-92":  "Бензин",
@@ -164,7 +165,7 @@ TG_FUEL_TO_CAT = {
     "ТС-1":   "ДтЛ",   # авиационный керосин — показываем как летнее ДТ
     "РТ":     "ДтЛ",
 }
- 
+
 TG_PRICES_JSON = "telegram_prices.json"
 
 
@@ -193,8 +194,8 @@ def load_transit_city_station_coords(csv_path=TRANSIT_CITY_STATIONS_CSV):
         for station_name in names:
             coords[station_name] = (lat, lon)
     return coords
- 
- 
+
+
 def load_telegram_prices():
     """
     Читает telegram_prices.json и возвращает список маркеров
@@ -204,37 +205,37 @@ def load_telegram_prices():
     if not os.path.exists(TG_PRICES_JSON):
         print(f"ℹ️  {TG_PRICES_JSON} не найден — слой Telegram пропущен.")
         return []
- 
+
     try:
         with open(TG_PRICES_JSON, encoding="utf-8") as f:
             data = json.load(f)
     except Exception as e:
         print(f"⚠️  Ошибка чтения {TG_PRICES_JSON}: {e}")
         return []
- 
+
     latest = data.get("latest", {})
     tg_station_coords = load_transit_city_station_coords()
     prices = latest.get("prices", [])
     date   = latest.get("date", "")
     # Date for popup in DD.MM.YYYY format
     date_short = date if date else ""
- 
+
     # Группируем по станции
     by_station = defaultdict(list)
     for entry in prices:
         station = entry.get("station", "")
         if station:
             by_station[station].append(entry)
- 
+
     results = []
     unmatched = []
- 
+
     for station, entries in by_station.items():
         coords = tg_station_coords.get(station)
         if coords is None:
             unmatched.append(station)
             continue
- 
+
         lat, lon = coords
         fuels = []
         for e in entries:
@@ -255,7 +256,7 @@ def load_telegram_prices():
                 "cat":   cat,
                 "date":  date_short,
             })
- 
+
         if fuels:
             results.append({
                 "code":  f"TG_{station.upper().replace(' ', '_')[:12]}",
@@ -264,11 +265,11 @@ def load_telegram_prices():
                 "lon":   lon,
                 "fuels": fuels,
             })
- 
+
     print(f"✅ Telegram: станций {len(results)}, дата {date}")
     if unmatched:
         print(f"   Не найдены координаты: {', '.join(unmatched)}")
- 
+
     return results
 
 
@@ -2397,7 +2398,9 @@ def make_rosneft_icon():
     )
 
 
-def add_markers(map_obj, markers, group, company):
+def add_markers(map_obj, markers, group, company, export_rows=None):
+    if export_rows is not None:
+        export_rows.extend(price_rows(markers, company))
     is_lukoil = company in ("lukoil_spot", "lukoil_term")
     dark_red   = (company == "lukoil_term")
 
@@ -3042,6 +3045,7 @@ def rewrite_html_vendor_links(html_path):
 # MAIN
 # ──────────────────────────────────────────────────────────────────────────────
 def main():
+    export_rows = []
     print("🚀 Сборка карты...")
 
     ref = load_stations_reference(STATIONS_CSV)
@@ -3069,7 +3073,7 @@ def main():
         spimex_raw = process_spimex_data(latest, ref)
         if spimex_raw:
             spimex_data = aggregate_markers_by_coordinates(spimex_raw, precision=5, company="spimex")
-            add_markers(m, spimex_data, spimex_group, "spimex")
+            add_markers(m, spimex_data, spimex_group, "spimex", export_rows)
             print(f"✅ СПИМЕКС: маркеров {len(spimex_data)} ({os.path.basename(latest)})")
     else:
         print(f"ℹ️ В {DATA_FOLDER} нет PDF или справочника — слой СПИМЕКС пустой.")
@@ -3114,14 +3118,14 @@ def main():
         all_spot = merged + spot_only
         if all_spot:
             sp_data = aggregate_markers_by_coordinates(all_spot, precision=5, company="lukoil_spot")
-            add_markers(m, sp_data, luk_group, "lukoil_spot")
+            add_markers(m, sp_data, luk_group, "lukoil_spot", export_rows)
             print(f"✅ ЛУКОЙЛ СПОТ (вкл. объединённых {len(merged)}): маркеров {len(sp_data)}")
         luk_group.add_to(m)
 
         if term_only:
             tm_group = folium.FeatureGroup(name="Лукойл Терм", show=True)
             tm_data  = aggregate_markers_by_coordinates(term_only, precision=5, company="lukoil_term")
-            add_markers(m, tm_data, tm_group, "lukoil_term")
+            add_markers(m, tm_data, tm_group, "lukoil_term", export_rows)
             tm_group.add_to(m)
             print(f"✅ ЛУКОЙЛ ТЕРМ (только): маркеров {len(tm_data)}")
 
@@ -3130,16 +3134,16 @@ def main():
     if rosneft_raw:
         rn_group = folium.FeatureGroup(name='ПАО "НК "Роснефть"', show=True)
         rn_data  = aggregate_markers_by_coordinates(rosneft_raw, precision=5, company="rosneft")
-        add_markers(m, rn_data, rn_group, "rosneft")
+        add_markers(m, rn_data, rn_group, "rosneft", export_rows)
         rn_group.add_to(m)
         print(f"✅ Роснефть: маркеров на карте {len(rn_data)}")
 
-    # 5. TELEGRAM (цены от Юлии)
+    # 5. TELEGRAM (нормализованные сообщения поставщика)
     tg_raw = load_telegram_prices()
     if tg_raw:
         tg_group = folium.FeatureGroup(name="Транзит Сити", show=True)
         tg_data  = aggregate_markers_by_coordinates(tg_raw, precision=4, company="other")
-        add_markers(m, tg_data, tg_group, "other")
+        add_markers(m, tg_data, tg_group, "other", export_rows)
         tg_group.add_to(m)
         print(f"✅ Telegram: маркеров на карте {len(tg_data)}")
 
@@ -3171,7 +3175,8 @@ def main():
     m.save(str(out_file))
     ensure_local_vendor_assets(out_dir)
     rewrite_html_vendor_links(out_file)
-    print(f"✅ Карта сохранена: {out_file}")
+    write_csv(export_rows, out_dir / "prices.csv")
+    print(f"✅ Карта и CSV сохранены: {out_file}")
 
 
 if __name__ == "__main__":
