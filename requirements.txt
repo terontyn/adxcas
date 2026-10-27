@@ -1,0 +1,7 @@
+pandas
+pdfplumber
+folium
+requests
+openpyxl
+geopy
+beautifulsoup4
